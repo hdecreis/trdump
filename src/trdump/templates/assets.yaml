@@ -1,0 +1,35 @@
+# Portfolio positions with live prices.
+source: assets
+columns:
+  - header: ISIN
+    value: "{{ item.isin }}"
+  - header: Asset
+    value: "{{ item.asset_name }}"
+  # V2 fields (traderepublic-sync >= 0.4): instrument_type ∈
+  # {stock, fund, crypto, privateFund, …}; category ∈
+  # {stocksAndETFs, cryptos, privateMarkets, …}. Both render as
+  # blank when libtrsync used the legacy compactPortfolio path.
+  - header: Type
+    value: "{{ item.instrument_type }}"
+  - header: Category
+    value: "{{ item.category }}"
+  - header: Quantity
+    value: "{{ item.quantity }}"
+  - header: Average buy-in
+    value: "{{ item.average_buy_in }}"
+  - header: Current price
+    value: "{{ item.current_price }}"
+  - header: Currency
+    value: "{{ item.currency }}"
+  - header: Current value
+    value: "{{ item.current_value }}"
+  - header: Daily %
+    value: "{{ item.daily_trend_pct }}"
+  - header: Daily EUR
+    value: "{{ item.daily_trend_eur }}"
+  - header: Since-buy %
+    value: "{{ item.since_buy_pct }}"
+  - header: Since-buy EUR
+    value: "{{ item.since_buy_eur }}"
+  - header: Exchange
+    value: "{{ item.exchange_id }}"

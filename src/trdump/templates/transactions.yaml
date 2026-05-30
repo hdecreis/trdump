@@ -1,0 +1,39 @@
+# Dual-legged transaction view.
+source: transactions_dual
+# Optional Jinja2 expression evaluated per row; falsy = drop the row.
+filter: "{{ item.transaction_type }}"
+columns:
+  - header: Date
+    value: "{{ item.date }}"
+  - header: Type
+    value: "{{ item.transaction_type }}"
+  - header: Account
+    value: "{{ item.account_name }}"
+  - header: Description
+    value: "{{ item.description }}"
+  - header: Asset
+    value: "{{ item.asset_name }}"
+  - header: ISIN
+    value: "{{ item.asset_isin }}"
+  - header: Quantity
+    value: "{{ item.quantity }}"
+  - header: Unit price
+    value: "{{ item.unit_price }}"
+  - header: Currency
+    value: "{{ item.currency }}"
+  - header: Credit
+    value: "{{ item.credit_amount }}"
+  - header: Credit asset
+    value: "{{ item.credit_asset_code }}"
+  - header: Debit
+    value: "{{ item.debit_amount }}"
+  - header: Debit asset
+    value: "{{ item.debit_asset_code }}"
+  - header: Fees
+    value: "{{ item.fee_amount }}"
+  - header: Taxes
+    value: "{{ item.tax_amount }}"
+  - header: TR ID
+    value: "{{ item.tr_id }}"
+  - header: TR event
+    value: "{{ item.tr_event_type }}"

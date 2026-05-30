@@ -1,0 +1,46 @@
+# Lean buy/sell view for spreadsheets.
+# One row per PURCHASE/BUY/SELL, asset-direction folded into single columns.
+source: transactions_dual
+# Keep only buy/sell legs; everything else (dividends, transfers, …) is dropped.
+filter: >-
+  {{ item.transaction_type in ['PURCHASE', 'BUY', 'SELL'] }}
+columns:
+  - header: Date
+    value: "{{ item.date }}"
+  - header: Account
+    value: "{{ item.account_name }}"
+  - header: Side
+    value: >-
+      {%- if item.transaction_type == 'SELL' -%}Sell{%- else -%}Buy{%- endif -%}
+  - header: Asset
+    value: >-
+      {%- if item.transaction_type == 'SELL' -%}
+      {{ item.debit_asset_name or item.debit_asset_code }}
+      {%- else -%}
+      {{ item.credit_asset_name or item.credit_asset_code }}
+      {%- endif -%}
+  - header: Quantity
+    value: >-
+      {%- if item.transaction_type == 'SELL' -%}
+      {{ item.debit_amount or '' }}
+      {%- else -%}
+      {{ item.credit_amount or '' }}
+      {%- endif -%}
+  - header: Price
+    value: >-
+      {%- if item.transaction_type == 'SELL' -%}
+      {{ item.credit_amount or '' }}
+      {%- elif item.debit_amount -%}
+      {{ -item.debit_amount }}
+      {%- endif -%}
+  - header: Currency
+    value: >-
+      {%- if item.transaction_type == 'SELL' -%}
+      {{ item.credit_asset_code }}
+      {%- else -%}
+      {{ item.debit_asset_code }}
+      {%- endif -%}
+  - header: Fees
+    value: "{% if item.fee_amount %}{{ -item.fee_amount }}{% endif %}"
+  - header: Taxes
+    value: "{% if item.tax_amount %}{{ -item.tax_amount }}{% endif %}"

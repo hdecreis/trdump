@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trdump"
+version = "0.1.0"
+description = "Trade Republic data dumper, exporter, and live monitor shell built on traderepublic-sync."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Helios de Creisquer", email = "hdecreis@gmail.com" },
+]
+
+dependencies = [
+    # 0.4.0 ships native `connect 34` and uses compactPortfolioByTypeV2
+    # for subscribe_portfolio / fetch_asset_list. Older versions silently
+    # drop V2 subs — pin out the foot-gun.
+    "traderepublic-sync[playwright]>=0.4",
+    "click>=8.1",
+    "prompt_toolkit>=3.0",
+    "Jinja2>=3.1",
+    "openpyxl>=3.1",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+trdump = "trdump.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+trdump = ["templates/*.yaml"]

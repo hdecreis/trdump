@@ -1,0 +1,13 @@
+# Account list (one row per cash/securities account).
+source: accounts
+columns:
+  - header: Name
+    value: "{{ item.account_name }}"
+  - header: Type
+    value: "{{ item.account_type }}"
+  - header: Currency
+    value: "{{ item.currency }}"
+  - header: Securities account
+    value: "{{ item.securities_account_number }}"
+  - header: Cash account
+    value: "{{ item.cash_account_number }}"
