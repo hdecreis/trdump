@@ -276,6 +276,12 @@ class AccountInfo:
         self.expanded = False
         self.cash_balance: float | None = None
         self.cash_currency: str = currency
+        # Lifetime cash interest ("Total Earned"), populated by the snapshot
+        # for the brokerage DEFAULT account only (TR pays interest on that
+        # one cash account). Shown in the Cash row's Rlz cell and folded into
+        # the account's realized total. None until a snapshot lands / when
+        # interest isn't activated.
+        self.interest_earned: float | None = None
         # category -> isin -> {asset_name, quantity, avg_buy_in,
         #                      last_price, prev_close, ticker_sub_id,
         #                      instrument_type, status, category}
@@ -433,6 +439,11 @@ class AccountInfo:
                 continue
             found = True
             total += (r or 0.0) + (d or 0.0)
+        # Cash interest is realized income too (shown in the Cash row's Rlz);
+        # fold it in so the account headline matches the sum of its rows.
+        if self.interest_earned is not None:
+            found = True
+            total += self.interest_earned
         return total if found else None
 
 
@@ -829,10 +840,14 @@ def _emit_cash_row(parts, state, acc, asset_w: int):
         f"{'':>{_COL_LAST}}  ",
     ))
     parts.append((value_style, f"{cash_value_s:>{_COL_VALUE}}"))
+    # Lifetime cash interest shows in the Rlz column on the Cash row (only
+    # the brokerage DEFAULT account earns it; others stay blank).
+    rlz = acc.interest_earned
+    rlz_s = f"{_arrow(rlz)} {rlz:+,.2f}" if rlz is not None else ""
     parts.append((
         "",
         f"  {'':>{_COL_TDAY_D}}  {'':>{_COL_TDAY_P}}  "
-        f"{'':>{_COL_ALL_D}}  {'':>{_COL_ALL_P}}  {'':>{_COL_RLZ}}\n",
+        f"{'':>{_COL_ALL_D}}  {'':>{_COL_ALL_P}}  {rlz_s:>{_COL_RLZ}}\n",
     ))
 
 
@@ -1913,25 +1928,43 @@ class Monitor:
             self._snapshot_running = False
             return
 
-        n_held, n_sold = self._apply_snapshot(realized["instruments"], sold)
+        # Cash interest is a separate REST call (and may be deactivated on the
+        # account) — fetch it best-effort so a failure here doesn't lose the
+        # realized/sold figures we already have.
+        interest = None
+        try:
+            interest = await pf.interest()
+        except Exception as e:  # noqa: BLE001 — secondary, never sink the snapshot
+            self._push_log(f"snapshot: interest unavailable ({e})")
+
+        n_held, n_sold = self._apply_snapshot(realized["instruments"], sold, interest)
+        earned = interest.earned if interest else None
+        interest_s = (
+            f", interest {earned:+,.2f} EUR" if earned is not None else ""
+        )
         self._push_log(
             f"snapshot done: realized {realized['total_realized_eur']:+,.2f} EUR, "
-            f"dividends {realized['total_dividends_eur']:+,.2f} EUR "
+            f"dividends {realized['total_dividends_eur']:+,.2f} EUR"
+            f"{interest_s} "
             f"({n_held} held + {n_sold} sold instrument(s))."
         )
         self.state.status_msg = "Ready."
         self._invalidate()
         self._snapshot_running = False
 
-    def _apply_snapshot(self, realized_instruments, sold) -> tuple[int, int]:
+    def _apply_snapshot(
+        self, realized_instruments, sold, interest=None
+    ) -> tuple[int, int]:
         """Attach realized P&L to held positions; add sold assets as qty-0 rows.
 
         ``realized_instruments`` is the v1 facade's ``RealizedPnl`` list
         (held + sold, each with ``sec_acc_no`` when TR served it directly);
-        ``sold`` is the ``SoldAsset`` list (carries readable names). Returns
-        ``(held_count, sold_count)`` for the summary line. Idempotent — it
-        clears prior figures and rebuilds the ``sold`` bucket each run, so a
-        re-snapshot reflects fresh data rather than stacking.
+        ``sold`` is the ``SoldAsset`` list (carries readable names);
+        ``interest`` is the v1 ``InterestEarned`` (or None) — its lifetime
+        ``earned`` is attached to the brokerage DEFAULT account's Cash row.
+        Returns ``(held_count, sold_count)`` for the summary line. Idempotent
+        — it clears prior figures and rebuilds the ``sold`` bucket each run,
+        so a re-snapshot reflects fresh data rather than stacking.
         """
         accounts = self.state.accounts
         if not accounts:
@@ -1942,6 +1975,20 @@ class Monitor:
         # re-run is a clean replace.
         for acc in accounts:
             acc.positions_by_category[_CAT_SOLD] = {}
+            acc.interest_earned = None
+
+        # Cash interest lands on the brokerage DEFAULT account (fallback
+        # JUNIOR_TRUST), mirroring TR's GetBrokerageCashAccountNumberUseCase.
+        if interest is not None and interest.earned is not None:
+            brokerage = next(
+                (a for a in accounts if a.product_type == "DEFAULT"),
+                next(
+                    (a for a in accounts if a.product_type == "JUNIOR_TRUST"),
+                    None,
+                ),
+            )
+            if brokerage is not None:
+                brokerage.interest_earned = interest.earned
         held_to_acc: dict[str, AccountInfo] = {}
         for acc in accounts:
             for isin, p in acc.positions.items():
