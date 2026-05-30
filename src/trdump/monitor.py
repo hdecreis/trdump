@@ -86,9 +86,10 @@ from typing import Any
 from prompt_toolkit.application import Application, get_app_or_none
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import Frame, TextArea
@@ -475,6 +476,19 @@ class MonitorState:
         self.log_format: str = "compact"  # or "verbose"
         self.status_msg: str = "Ready."
         self.flashes = FlashState()
+        # Visibility toggles driven by the show/hide commands.
+        # ``show_exited`` filters the synthetic sold (_CAT_SOLD) rows out of
+        # the accounts table; ``show_watched`` / ``show_log`` collapse those
+        # whole panels to a single placeholder bar.
+        #
+        # Watched and Log start hidden to keep the accounts table front and
+        # centre. They auto-reveal on demand: Watched when the first ticker
+        # is added (Monitor._add), Log when a typed command emits output
+        # (Monitor._push_log + _handling_command). The user can re-hide
+        # either with `hide watched` / `hide log`.
+        self.show_exited: bool = True
+        self.show_watched: bool = False
+        self.show_log: bool = False
         # When True, _refresh_log preserves the buffer cursor so the user
         # can read older lines without the auto-scroll yanking them back.
         # Reset to False when PageDown / End lands the cursor at the
@@ -738,6 +752,13 @@ def _render_accounts(state: MonitorState):
             )
 
         for isin, p in sorted(acc.positions.items(), key=_row_sort_key):
+            # `hide exited` drops the synthetic sold rows from the table.
+            # _account_panel_lines counts this same render output, so the
+            # panel height tracks the filter automatically.
+            if not state.show_exited and (
+                p.get("category") == _CAT_SOLD or p.get("sold")
+            ):
+                continue
             _emit_position_row(parts, state, acc, isin, p, asset_w)
 
     return parts
@@ -917,6 +938,10 @@ class Monitor:
         # in a ref so the task isn't GC'd mid-run (CLAUDE.md lesson #3).
         self._snapshot_task: asyncio.Task | None = None
         self._snapshot_running: bool = False
+        # True while a typed command is being handled, so log lines it emits
+        # auto-reveal the (default-hidden) Log panel — background WS chatter
+        # pushed outside this window leaves the panel hidden. See _push_log.
+        self._handling_command: bool = False
 
     # ── prompt_toolkit layout ─────────────────────────────────────────────
 
@@ -937,14 +962,58 @@ class Monitor:
             accept_handler=self._on_submit,
         )
 
-        # Box-sizing priority:
-        #   1. Accounts gets its preferred size (content-driven, uncapped)
-        #   2. Watched tickers gets its preferred size (content-driven,
-        #      capped only by an upper bound so a 50-item watchlist can't
-        #      starve the log)
-        #   3. Log absorbs whatever's left via weight=1, with a small min
-        #      so it never collapses to zero
-        log_window = Window(content=log_control, height=Dimension(min=3, weight=1))
+        # Box-sizing priority. The Accounts and Watched panels are *pinned*
+        # to their exact content height (preferred == max), and the Log gets
+        # all the slack. This matters in both directions:
+        #
+        #   * Surplus (tall terminal): only the Log can grow past its
+        #     preferred, so it soaks up the leftover rows instead of the
+        #     content panels sprouting blank lines.
+        #   * Deficit (short terminal): prompt_toolkit's HSplit fills every
+        #     child toward its *preferred* weighted by weight before it caps
+        #     anyone. A Log with no explicit preferred reports its *content*
+        #     height (dozens of log lines) as preferred, so it used to
+        #     compete head-to-head with Accounts for the scarce rows and
+        #     clip the accounts table mid-list. Giving the Log a tiny
+        #     preferred (== min) makes it yield: Accounts and Watched fill to
+        #     their content first, the Log shrinks to its floor and scrolls
+        #     (PgUp/PgDn). Without this pin the panel height silently stops
+        #     tracking the row count as soon as the terminal isn't tall
+        #     enough to show everything.
+        #
+        # The Accounts/Watched dimensions are computed fresh on every redraw
+        # (they're callables), so the pinned height re-tracks the row count
+        # whenever positions — including the synthetic sold/eXited rows — or
+        # watched tickers are added or removed.
+        log_window = Window(
+            content=log_control, height=Dimension(min=3, preferred=3, weight=1)
+        )
+
+        def _accounts_dimension() -> Dimension:
+            n = _account_panel_lines(state)
+            return Dimension(min=3, preferred=n, max=max(3, n))
+
+        def _watched_dimension() -> Dimension:
+            # Pin to content, but never let a long watchlist starve the log.
+            n = min(_watched_panel_lines(state) + 1, 20)
+            return Dimension(min=2, preferred=n, max=max(2, n))
+
+        def _collapsed_bar(label: str, show_cmd: str) -> Window:
+            """One-line placeholder shown in place of a hidden panel.
+
+            Renders a centred ``─── <label>  (`show …` to show) ───`` rule
+            that fills the terminal width, so a hidden Watched/Log panel
+            still reads as a labelled, re-openable section.
+            """
+
+            def _text():
+                msg = f" {label}  (`{show_cmd}` to show) "
+                cols = _terminal_columns()
+                pad = max(0, cols - len(msg))
+                left = pad // 2
+                return [("class:frame.border", "─" * left + msg + "─" * (pad - left))]
+
+            return Window(content=FormattedTextControl(text=_text), height=1)
 
         layout = Layout(
             HSplit(
@@ -953,26 +1022,45 @@ class Monitor:
                         Window(
                             content=accounts_control,
                             wrap_lines=False,
-                            height=lambda: Dimension(
-                                min=3,
-                                preferred=_account_panel_lines(state),
-                            ),
+                            height=_accounts_dimension,
                         ),
                         title="Accounts",
                     ),
-                    Frame(
-                        Window(
-                            content=tickers_control,
-                            wrap_lines=False,
-                            height=lambda: Dimension(
-                                min=2,
-                                preferred=_watched_panel_lines(state) + 1,
-                                max=20,
+                    ConditionalContainer(
+                        Frame(
+                            Window(
+                                content=tickers_control,
+                                wrap_lines=False,
+                                height=_watched_dimension,
                             ),
+                            title="Watched tickers",
                         ),
-                        title="Watched tickers",
+                        filter=Condition(lambda: state.show_watched),
                     ),
-                    Frame(log_window, title="Log  (PgUp/PgDn to scroll · End to jump back)"),
+                    ConditionalContainer(
+                        _collapsed_bar("Watched tickers", "show watched"),
+                        filter=Condition(lambda: not state.show_watched),
+                    ),
+                    ConditionalContainer(
+                        Frame(
+                            log_window,
+                            title="Log  (PgUp/PgDn to scroll · End to jump back)",
+                        ),
+                        filter=Condition(lambda: state.show_log),
+                    ),
+                    ConditionalContainer(
+                        _collapsed_bar("Log", "show log"),
+                        filter=Condition(lambda: not state.show_log),
+                    ),
+                    # The visible Log frame is the panel that soaks up surplus
+                    # vertical space (Accounts/Watched are pinned to content).
+                    # When the Log is hidden this filler takes over that role
+                    # so the freed rows stay above the prompt instead of
+                    # leaving a blank gap *below* it.
+                    ConditionalContainer(
+                        Window(height=Dimension(weight=1)),
+                        filter=Condition(lambda: not state.show_log),
+                    ),
                     Window(content=status_control, height=1, style="class:status"),
                     input_area,
                 ]
@@ -1052,6 +1140,13 @@ class Monitor:
 
     def _push_log(self, line: str) -> None:
         self.state.log(line)
+        # A typed command that produces output reveals the (default-hidden)
+        # Log panel so the user actually sees its result. Background WS
+        # chatter (ticks, portfolio loads) pushed outside command handling
+        # leaves the panel as the user left it.
+        if self._handling_command and not self.state.show_log:
+            self.state.show_log = True
+            self._invalidate()
         self._refresh_log()
 
     def _invalidate(self) -> None:
@@ -1103,6 +1198,7 @@ class Monitor:
         return False
 
     async def _handle_command(self, line: str) -> None:
+        self._handling_command = True
         try:
             parts = line.split(None, 1)
             cmd = parts[0].lower()
@@ -1118,8 +1214,12 @@ class Monitor:
                 self._push_log(
                     "commands: add <isin|query>  remove <isin|query|all>  list  "
                     "format compact|verbose  expand <N|all>  collapse <N|all>  "
-                    "snapshot  help  quit"
+                    "show|hide exited|log|watched  snapshot  help  quit"
                 )
+                return
+
+            if cmd in ("show", "hide"):
+                self._set_visibility(cmd, arg)
                 return
 
             if cmd == "list":
@@ -1167,6 +1267,26 @@ class Monitor:
             self._push_log(f"unknown command: {cmd!r} (try `help`)")
         except Exception as e:
             self._push_log(f"command error: {e}")
+        finally:
+            self._handling_command = False
+
+    def _set_visibility(self, verb: str, arg: str) -> None:
+        """Handle ``show`` / ``hide`` for the exited rows and the two panels."""
+        on = verb == "show"
+        what = arg.lower().strip()
+        if what in ("exited", "x", "sold"):
+            self.state.show_exited = on
+            self.state.status_msg = f"eXited assets {'shown' if on else 'hidden'}."
+        elif what == "log":
+            self.state.show_log = on
+            self.state.status_msg = f"Log {'shown' if on else 'hidden'}."
+        elif what in ("watched", "watchlist", "tickers"):
+            self.state.show_watched = on
+            self.state.status_msg = f"Watched tickers {'shown' if on else 'hidden'}."
+        else:
+            self._push_log(f"usage: {verb} exited|log|watched")
+            return
+        self._invalidate()
 
     def _toggle_account(self, arg: str, expanded: bool) -> None:
         verb = "expand" if expanded else "collapse"
@@ -1235,6 +1355,10 @@ class Monitor:
             "exchange_id": None,
         }
         self.state.tickers[isin] = entry
+        # Surface the (default-hidden) Watched panel now that it has content.
+        if not self.state.show_watched:
+            self.state.show_watched = True
+            self._invalidate()
 
         def on_tick(data):
             if data.get("_error"):
@@ -1740,6 +1864,13 @@ class Monitor:
         ``_snapshot_running`` so a second `snapshot` while one is in flight
         is a no-op rather than a double walk.
         """
+        if manual and not self.state.show_log:
+            # A user-triggered snapshot streams its progress/result to the
+            # Log; its output lands asynchronously (after the command handler
+            # returns), so reveal the panel up front rather than relying on
+            # the _handling_command auto-reveal.
+            self.state.show_log = True
+            self._invalidate()
         if self._snapshot_running:
             if manual:
                 self._push_log("snapshot already running…")
