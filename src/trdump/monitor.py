@@ -885,13 +885,19 @@ def _watched_panel_lines(state: MonitorState) -> int:
 
 
 def _account_panel_lines(state: MonitorState) -> int:
-    if not state.accounts:
-        return 1
-    n = len(state.accounts)
-    for acc in state.accounts:
-        if acc.expanded:
-            n += max(1, len(acc.positions))
-    return n
+    """Exact number of lines ``_render_accounts`` emits at full size.
+
+    Derived by counting newlines in the rendered fragments rather than
+    re-deriving the row math, so the panel height can never drift from
+    what's actually drawn when row types are added or removed. This counts
+    *every* item the renderer produces — the header + separator, each
+    account row, the cash row under each expanded account, and every
+    position row across all category buckets (including the synthetic
+    ``sold`` bucket of eXited assets). The earlier hand-rolled count
+    silently omitted the per-account cash row, so the panel was always one
+    line short per expanded account; the sold rows made the gap visible.
+    """
+    return sum(text.count("\n") for _style, text in _render_accounts(state))
 
 
 # ── Monitor ───────────────────────────────────────────────────────────────────
@@ -949,7 +955,7 @@ class Monitor:
                             wrap_lines=False,
                             height=lambda: Dimension(
                                 min=3,
-                                preferred=_account_panel_lines(state) + 2,
+                                preferred=_account_panel_lines(state),
                             ),
                         ),
                         title="Accounts",
